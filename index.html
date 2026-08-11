@@ -8,6 +8,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- 引入 Phosphor Icons 作為圖示 -->
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <script src="https://cdn.jsdelivr.net/npm/barcode-detector@2/dist/barcode-detector.umd.js"></script>
     <style>
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -173,23 +174,64 @@
         let scannedDataMap = new Map(); // 使用 Map 來避免重複條碼 (Key: rawValue, Value: BarcodeObject)
         let isScanning = false;
 
-        // 檢查環境支援
         async function checkCompatibility() {
+            // 如果環境不支援原生 BarcodeDetector，Polyfill 會自動注入 window.BarcodeDetector
             if (!('BarcodeDetector' in window)) {
-                showStatus("您的瀏覽器不支援原生的 BarcodeDetector API。請使用最新版的 Chrome/Edge (桌面或 Android)。", 'text-red-600');
+                showStatus("無法載入條碼辨識模組，請檢查網路連線。", 'text-red-600');
                 btnStart.disabled = true;
                 return false;
             }
             try {
-                // 初始化偵測器，設定支援的格式
-                const supportedFormats = await BarcodeDetector.getSupportedFormats();
+                // 初始化偵測器，設定常見支援的條碼格式
+                const supportedFormats = await BarcodeDetector.getSupportedFormats().catch(() => []);
+                const defaultFormats = ['qr_code', 'ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e'];
+                
                 barcodeDetector = new BarcodeDetector({ 
-                    formats: supportedFormats.length > 0 ? supportedFormats : ['qr_code', 'ean_13', 'ean_8', 'code_128', 'code_39'] 
+                    formats: supportedFormats.length > 0 ? supportedFormats : defaultFormats 
                 });
                 return true;
             } catch (e) {
-                showStatus("初始化條碼偵測器失敗。", 'text-red-600');
-                return false;
+                console.warn("使用預設格式初始化 BarcodeDetector", e);
+                try {
+                    barcodeDetector = new BarcodeDetector({ formats: ['qr_code', 'ean_13', 'code_128'] });
+                    return true;
+                } catch (err) {
+                    showStatus("初始化條碼偵測器失敗。", 'text-red-600');
+                    return false;
+                }
+            }
+        }
+
+        async function startCamera() {
+            if (!(await checkCompatibility())) return;
+
+            try {
+                showStatus("正在請求相機權限...", 'text-blue-600');
+                // 請求後置鏡頭 (環境鏡頭)
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } 
+                });
+                video.srcObject = stream;
+                
+                // 等待影片元資料加載完成，設定畫布大小
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth || 640;
+                    canvas.height = video.videoHeight || 480;
+                    initialMessage.style.display = 'none';
+                    scanLine.style.display = 'block';
+                    
+                    // 切換按鈕狀態
+                    btnStart.classList.add('hidden');
+                    btnStop.classList.remove('hidden');
+                    isScanning = true;
+                    showStatus("掃描中...", 'text-green-600');
+                    
+                    // 開始偵測迴圈
+                    detectBarcodes();
+                };
+            } catch (err) {
+                console.error("存取相機錯誤:", err);
+                showStatus("無法存取相機，請確認已授權相機權限且使用 HTTPS 連結。", 'text-red-600');
             }
         }
 
