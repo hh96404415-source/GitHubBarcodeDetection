@@ -202,70 +202,61 @@
             }
         }
 
+        // 啟動相機 (修復相容性與重複定義問題)
         async function startCamera() {
             if (!(await checkCompatibility())) return;
 
             try {
                 showStatus("正在請求相機權限...", 'text-blue-600');
-                // 請求後置鏡頭 (環境鏡頭)
-                stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } 
-                });
+                
+                // 檢查是否支援 mediaDevices
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error("您的瀏覽器不支援相機 API，請確保使用 HTTPS 或開啟網頁於預設瀏覽器。");
+                }
+
+                // 多重相機設定備用機制 (從後置鏡頭到通用鏡頭)
+                const constraintsList = [
+                    { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+                    { video: { facingMode: 'environment' } },
+                    { video: true }
+                ];
+
+                stream = null;
+                for (const constraints of constraintsList) {
+                    try {
+                        stream = await navigator.mediaDevices.getUserMedia(constraints);
+                        if (stream) break;
+                    } catch (e) {
+                        console.warn("嘗試相機設定失敗，切換備用設定...", e);
+                    }
+                }
+
+                if (!stream) {
+                    throw new Error("無法取得相機串流，請檢查權限設定。");
+                }
+
                 video.srcObject = stream;
                 
-                // 等待影片元資料加載完成，設定畫布大小
-                video.onloadedmetadata = () => {
-                    canvas.width = video.videoWidth || 640;
-                    canvas.height = video.videoHeight || 480;
-                    initialMessage.style.display = 'none';
-                    scanLine.style.display = 'block';
-                    
-                    // 切換按鈕狀態
-                    btnStart.classList.add('hidden');
-                    btnStop.classList.remove('hidden');
-                    isScanning = true;
-                    showStatus("掃描中...", 'text-green-600');
-                    
-                    // 開始偵測迴圈
-                    detectBarcodes();
-                };
-            } catch (err) {
-                console.error("存取相機錯誤:", err);
-                showStatus("無法存取相機，請確認已授權相機權限且使用 HTTPS 連結。", 'text-red-600');
-            }
-        }
+                // iOS Safari 必須顯式觸發 play()
+                await video.play();
 
-        // 啟動相機
-        async function startCamera() {
-            if (!(await checkCompatibility())) return;
-
-            try {
-                showStatus("正在請求相機權限...", 'text-blue-600');
-                // 請求後置鏡頭 (環境鏡頭)
-                stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
-                });
-                video.srcObject = stream;
+                canvas.width = video.videoWidth || 640;
+                canvas.height = video.videoHeight || 480;
+                initialMessage.style.display = 'none';
+                scanLine.style.display = 'block';
                 
-                // 等待影片元資料加載完成，設定畫布大小
-                video.onloadedmetadata = () => {
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    initialMessage.style.display = 'none';
-                    scanLine.style.display = 'block';
-                    
-                    // 切換按鈕狀態
-                    btnStart.classList.add('hidden');
-                    btnStop.classList.remove('hidden');
-                    isScanning = true;
-                    showStatus("掃描中...", 'text-green-600');
-                    
-                    // 開始偵測迴圈
-                    detectBarcodes();
-                };
+                // 切換按鈕狀態
+                btnStart.classList.add('hidden');
+                btnStop.classList.remove('hidden');
+                isScanning = true;
+                showStatus("掃描中...", 'text-green-600');
+                
+                // 開始偵測迴圈
+                detectBarcodes();
+
             } catch (err) {
                 console.error("存取相機錯誤:", err);
-                showStatus("無法存取相機，請確認權限設定。", 'text-red-600');
+                showStatus(`無法存取相機：${err.message || '請確認權限允許。'}`, 'text-red-600');
             }
         }
 
@@ -481,10 +472,15 @@
         btnUpload.addEventListener('click', uploadData);
         btnClear.addEventListener('click', clearResults);
 
-        // 頁面載入時進行基本檢查
+        // 頁面載入時進行基本檢查與 App 內建瀏覽器提醒
         window.addEventListener('DOMContentLoaded', () => {
-            if (!('BarcodeDetector' in window)) {
-                showStatus("警告：當前瀏覽器可能不支援原生條碼識別。建議使用 Chrome Android。", 'text-yellow-600');
+            const ua = navigator.userAgent.toLowerCase();
+            const isInAppBrowser = ua.includes('line') || ua.includes('fbav') || ua.includes('instagram');
+            
+            if (isInAppBrowser) {
+                showStatus("⚠️ 建議點擊右上角『以預設瀏覽器開啟』(Safari / Chrome) 以存取相機。", 'text-yellow-600');
+            } else if (!('BarcodeDetector' in window)) {
+                showStatus("警告：當前瀏覽器可能不支援原生條碼識別。建議使用 Chrome / Safari。", 'text-yellow-600');
             }
         });
     </script>
