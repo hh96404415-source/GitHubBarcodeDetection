@@ -4,15 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>多重條碼掃描與上傳系統</title>
-    <!-- 引入 Tailwind CSS 進行快速排版與樣式設定 -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- 引入 Phosphor Icons 作為圖示 -->
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
-    <script src="https://cdn.jsdelivr.net/npm/barcode-detector@2/dist/barcode-detector.umd.js"></script>
+    <!-- 引入全平台相容的 ZXing 條碼掃描庫 -->
+    <script src="https://cdn.jsdelivr.net/npm/@zxing/library@latest/umd/index.min.js"></script>
     <style>
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: #f3f4f6; /* Tailwind gray-100 */
+            background-color: #f3f4f6;
         }
         
         #video-container {
@@ -168,114 +167,94 @@
         const uploadCountSpan = document.getElementById('upload-count');
 
         // 狀態變數
-        let stream = null;
-        let barcodeDetector = null;
-        let animationId = null;
-        let scannedDataMap = new Map(); // 使用 Map 來避免重複條碼 (Key: rawValue, Value: BarcodeObject)
+        let codeReader = null;
+        let scannedDataMap = new Map(); // Key: rawValue, Value: BarcodeObject
         let isScanning = false;
 
-        async function checkCompatibility() {
-            // 如果環境不支援原生 BarcodeDetector，Polyfill 會自動注入 window.BarcodeDetector
-            if (!('BarcodeDetector' in window)) {
-                showStatus("無法載入條碼辨識模組，請檢查網路連線。", 'text-red-600');
+        function checkCompatibility() {
+            if (typeof ZXing === 'undefined') {
+                showStatus("無法載入 ZXing 辨識模組，請檢查網路連線。", 'text-red-600');
                 btnStart.disabled = true;
                 return false;
             }
             try {
-                // 初始化偵測器，設定常見支援的條碼格式
-                const supportedFormats = await BarcodeDetector.getSupportedFormats().catch(() => []);
-                const defaultFormats = ['qr_code', 'ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e'];
-                
-                barcodeDetector = new BarcodeDetector({ 
-                    formats: supportedFormats.length > 0 ? supportedFormats : defaultFormats 
-                });
-                return true;
-            } catch (e) {
-                console.warn("使用預設格式初始化 BarcodeDetector", e);
-                try {
-                    barcodeDetector = new BarcodeDetector({ formats: ['qr_code', 'ean_13', 'code_128'] });
-                    return true;
-                } catch (err) {
-                    showStatus("初始化條碼偵測器失敗。", 'text-red-600');
-                    return false;
+                if (!codeReader) {
+                    codeReader = new ZXing.BrowserMultiFormatReader();
                 }
+                return true;
+            } catch (err) {
+                console.error("初始化 ZXing 解碼器失敗:", err);
+                showStatus("初始化條碼偵測器失敗。", 'text-red-600');
+                return false;
             }
         }
 
-        // 啟動相機 (修復相容性與重複定義問題)
         async function startCamera() {
-            if (!(await checkCompatibility())) return;
+            if (!checkCompatibility()) return;
 
             try {
-                showStatus("正在請求相機權限...", 'text-blue-600');
+                showStatus("正在請求相機權限與啟動鏡頭...", 'text-blue-600');
                 
-                // 檢查是否支援 mediaDevices
-                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                    throw new Error("您的瀏覽器不支援相機 API，請確保使用 HTTPS 或開啟網頁於預設瀏覽器。");
+                // 取得相機裝置列表，優先選擇後置鏡頭 (environment/rear)
+                const videoInputDevices = await codeReader.listVideoInputDevices();
+                let selectedDeviceId = undefined;
+
+                if (videoInputDevices && videoInputDevices.length > 0) {
+                    const backCamera = videoInputDevices.find(device => 
+                        /back|rear|environment|後置|鏡頭/i.test(device.label)
+                    );
+                    selectedDeviceId = backCamera ? backCamera.deviceId : videoInputDevices[videoInputDevices.length - 1].deviceId;
                 }
 
-                // 多重相機設定備用機制 (從後置鏡頭到通用鏡頭)
-                const constraintsList = [
-                    { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
-                    { video: { facingMode: 'environment' } },
-                    { video: true }
-                ];
-
-                stream = null;
-                for (const constraints of constraintsList) {
-                    try {
-                        stream = await navigator.mediaDevices.getUserMedia(constraints);
-                        if (stream) break;
-                    } catch (e) {
-                        console.warn("嘗試相機設定失敗，切換備用設定...", e);
-                    }
-                }
-
-                if (!stream) {
-                    throw new Error("無法取得相機串流，請檢查權限設定。");
-                }
-
-                video.srcObject = stream;
-                
-                // iOS Safari 必須顯式觸發 play()
-                await video.play();
-
-                canvas.width = video.videoWidth || 640;
-                canvas.height = video.videoHeight || 480;
+                // 切換介面顯示
                 initialMessage.style.display = 'none';
                 scanLine.style.display = 'block';
-                
-                // 切換按鈕狀態
                 btnStart.classList.add('hidden');
                 btnStop.classList.remove('hidden');
                 isScanning = true;
-                showStatus("掃描中...", 'text-green-600');
-                
-                // 開始偵測迴圈
-                detectBarcodes();
+                showStatus("對準條碼即可自動識別...", 'text-green-600');
+
+                // 使用 ZXing continuous 解碼功能
+                codeReader.decodeFromVideoDevice(selectedDeviceId, 'camera-stream', (result, err) => {
+                    if (!isScanning) return;
+
+                    if (result) {
+                        const barcodeValue = result.getText();
+                        const formatName = result.getBarcodeFormat() ? result.getBarcodeFormat() : 'BARCODE';
+
+                        // 自動紀錄去重
+                        if (!scannedDataMap.has(barcodeValue)) {
+                            scannedDataMap.set(barcodeValue, {
+                                value: barcodeValue,
+                                format: formatName,
+                                time: new Date().toLocaleTimeString()
+                            });
+
+                            // 觸發短震動回饋 (裝置支援時)
+                            if (navigator.vibrate) navigator.vibrate(100);
+
+                            // 繪製視覺閃爍提示
+                            flashScanSuccess();
+                            updateResultsUI();
+                        }
+                    }
+                });
 
             } catch (err) {
                 console.error("存取相機錯誤:", err);
-                showStatus(`無法存取相機：${err.message || '請確認權限允許。'}`, 'text-red-600');
+                showStatus(`無法存取相機：${err.message || '請確認已授權相機權限。'}`, 'text-red-600');
+                stopCamera();
             }
         }
 
-        // 停止相機
         function stopCamera() {
-            if (stream) {
-                stream.getTracks().forEach(track => track.stop());
-                video.srcObject = null;
-            }
-            if (animationId) {
-                cancelAnimationFrame(animationId);
+            isScanning = false;
+            if (codeReader) {
+                codeReader.reset(); // 停止 ZXing 相機監聽與解碼
             }
             
-            isScanning = false;
             scanLine.style.display = 'none';
             initialMessage.style.display = 'flex';
-            
-            // 清除畫布
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
             
             // 切換按鈕狀態
             btnStop.classList.add('hidden');
@@ -283,79 +262,17 @@
             showStatus("已停止掃描。", 'text-gray-600');
         }
 
-        // 核心偵測函數 (遞迴呼叫)
-        async function detectBarcodes() {
-            if (!isScanning) return;
-
-            try {
-                // 確保影片正在播放且有畫面
-                if (video.readyState === video.HAVE_ENOUGH_DATA) {
-                    // 執行偵測
-                    const barcodes = await barcodeDetector.detect(video);
-                    
-                    // 清空上一幀的畫布
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-                    if (barcodes.length > 0) {
-                        barcodes.forEach(barcode => {
-                            // 1. 在畫布上繪製邊框
-                            drawBarcodeBox(barcode);
-                            
-                            // 2. 處理掃描結果 (去重)
-                            if (!scannedDataMap.has(barcode.rawValue)) {
-                                scannedDataMap.set(barcode.rawValue, {
-                                    value: barcode.rawValue,
-                                    format: barcode.format,
-                                    time: new Date().toLocaleTimeString()
-                                });
-                                // 震動回饋 (如果設備支援)
-                                if (navigator.vibrate) navigator.vibrate(100);
-                                // 更新 UI
-                                updateResultsUI();
-                            }
-                        });
-                    }
-                }
-            } catch (err) {
-                console.error("偵測條碼時發生錯誤:", err);
-            }
-
-            // 請求下一幀繼續偵測
-            animationId = requestAnimationFrame(detectBarcodes);
+        function flashScanSuccess() {
+            canvas.width = video.clientWidth || 300;
+            canvas.height = video.clientHeight || 200;
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 8;
+            ctx.strokeRect(0, 0, canvas.width, canvas.height);
+            setTimeout(() => {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }, 300);
         }
 
-        // 在 Canvas 上繪製條碼標記框
-        function drawBarcodeBox(barcode) {
-            const { cornerPoints } = barcode;
-            if (!cornerPoints || cornerPoints.length < 4) return;
-
-            ctx.beginPath();
-            ctx.moveTo(cornerPoints[0].x, cornerPoints[0].y);
-            for (let i = 1; i < cornerPoints.length; i++) {
-                ctx.lineTo(cornerPoints[i].x, cornerPoints[i].y);
-            }
-            ctx.closePath();
-            
-            // 樣式設定
-            ctx.lineWidth = 4;
-            ctx.strokeStyle = '#22c55e'; // 綠色邊框
-            ctx.fillStyle = 'rgba(34, 197, 94, 0.2)'; // 半透明綠色填充
-            ctx.stroke();
-            ctx.fill();
-
-            // 繪製文字背景與文字
-            const text = barcode.rawValue;
-            ctx.font = '16px Inter, sans-serif';
-            const textWidth = ctx.measureText(text).width;
-            
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-            ctx.fillRect(cornerPoints[0].x, cornerPoints[0].y - 25, textWidth + 10, 24);
-            
-            ctx.fillStyle = '#ffffff';
-            ctx.fillText(text, cornerPoints[0].x + 5, cornerPoints[0].y - 8);
-        }
-
-        // 更新結果列表 UI
         function updateResultsUI() {
             const count = scannedDataMap.size;
             uploadCountSpan.textContent = count;
@@ -367,7 +284,6 @@
                 
                 // 重新渲染列表
                 resultsList.innerHTML = '';
-                // 將 Map 轉為 Array 並反轉，讓最新掃描的在最上面
                 Array.from(scannedDataMap.values()).reverse().forEach(data => {
                     const li = document.createElement('li');
                     li.className = 'bg-white border border-gray-100 p-3 rounded-lg shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-2';
@@ -392,7 +308,7 @@
             }
         }
 
-        // 移除單一條碼 (供 UI 上的 X 按鈕呼叫)
+        // 移除單一條碼
         window.removeBarcode = function(value) {
             scannedDataMap.delete(value);
             updateResultsUI();
@@ -404,7 +320,6 @@
             updateResultsUI();
         }
 
-        // 上傳資料到 GAS
         async function uploadData() {
             if (scannedDataMap.size === 0) return;
             if (GAS_WEB_APP_URL.includes('請將這裡替換')) {
@@ -419,23 +334,17 @@
 
             const payload = { barcodes: barcodesArray };
             
-            // 更新 UI 狀態為上傳中
             btnUpload.disabled = true;
             const originalBtnHtml = btnUpload.innerHTML;
             btnUpload.innerHTML = '<i class="ph ph-spinner animate-spin text-xl"></i> 上傳中...';
             showStatus("正在將資料上傳至 Google Sheets...", 'text-blue-600');
 
             try {
-                // 發送 POST 請求至 GAS
-                // 注意：GAS Web App 通常會回傳重定向 (302)，但在 CORS 設定下，
-                // fetch 會默默處理或者我們使用 'no-cors'，但 'no-cors' 無法讀取回應。
-                // 若要讀取回應，GAS 必須正確處理 OPTIONS (Preflight) 請求 (如後端程式碼所示)
                 const response = await fetch(GAS_WEB_APP_URL, {
                     method: 'POST',
                     headers: {
-                        'Content-Type': 'text/plain;charset=utf-8', // 避免一些 CORS 複雜預檢問題，有時 GAS 更好處理 text/plain
+                        'Content-Type': 'text/plain;charset=utf-8',
                     },
-                    // 將 JSON 轉為字串發送
                     body: JSON.stringify(payload)
                 });
 
@@ -443,7 +352,7 @@
                     const result = await response.json();
                     if (result.status === 'success') {
                         showStatus("✅ 上傳成功！", 'text-green-600');
-                        clearResults(); // 上傳成功後清空列表
+                        clearResults();
                     } else {
                         showStatus(`❌ 上傳失敗: ${result.message}`, 'text-red-600');
                     }
@@ -452,11 +361,10 @@
                 }
             } catch (error) {
                 console.error("上傳錯誤:", error);
-                showStatus("❌ 網路連線錯誤或 CORS 問題，請檢查控制台日誌。", 'text-red-600');
+                showStatus("❌ 網路連線錯誤，請檢查網路或 GAS URL 設定。", 'text-red-600');
             } finally {
-                // 恢復按鈕狀態
                 btnUpload.innerHTML = originalBtnHtml;
-                updateResultsUI(); // 根據當前 Map 大小恢復 disabled 狀態
+                updateResultsUI();
             }
         }
 
@@ -472,15 +380,15 @@
         btnUpload.addEventListener('click', uploadData);
         btnClear.addEventListener('click', clearResults);
 
-        // 頁面載入時進行基本檢查與 App 內建瀏覽器提醒
+        // 頁面載入檢查
         window.addEventListener('DOMContentLoaded', () => {
             const ua = navigator.userAgent.toLowerCase();
             const isInAppBrowser = ua.includes('line') || ua.includes('fbav') || ua.includes('instagram');
             
             if (isInAppBrowser) {
-                showStatus("⚠️ 建議點擊右上角『以預設瀏覽器開啟』(Safari / Chrome) 以存取相機。", 'text-yellow-600');
-            } else if (!('BarcodeDetector' in window)) {
-                showStatus("警告：當前瀏覽器可能不支援原生條碼識別。建議使用 Chrome / Safari。", 'text-yellow-600');
+                showStatus("⚠️ 建議點擊右上角『以預設瀏覽器開啟』(Safari / Chrome) 以確保相機權限正常。", 'text-yellow-600');
+            } else {
+                checkCompatibility();
             }
         });
     </script>
